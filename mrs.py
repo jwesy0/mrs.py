@@ -4,6 +4,7 @@
     by Wes, 2025
 """
 
+from glob import glob
 import io
 import os
 from os import path
@@ -133,7 +134,7 @@ class _mrs_local_hdr:
         print('  version           %04x' % self.version)
         print('  flags             %04x' % self.flags)
         print('  compression       %04x' % self.compression)
-        print('  filetime          %02x %02x' % (self.filetime.time, self.filetime.date))
+        print('  filetime          %02x %02x' % (self.filetime.time.value, self.filetime.date.value))
         print('  crc32             %08x' % self.crc32)
         print('  compressed_size   %u' % self.compressed_size)
         print('  uncompressed_size %u' % self.uncompressed_size)
@@ -177,12 +178,13 @@ class _mrs_file:
     def __init__(self):
         self.lh = _mrs_local_hdr()
         self.dh = _mrs_central_dir_hdr()
-        self.filenameuc = None
+        self.filenameuc = None  # File name in Unicode
+        self.filenameenc = None # File name encoding
 
 class mrs_dupe_behavior:
     KEEP_NEW  = 0
     KEEP_OLD  = 1
-    KEEL_BOTH = 2
+    KEEP_BOTH = 2
 
 ######## mrs_encryption ########################################
 class mrs_encryption:
@@ -253,6 +255,7 @@ class mrs:
         fname = ''
         fext = ''
         fnum = 0
+        exact_match = (False, 0)
         n = []
 
         p = re.compile('(?P<fname>.+?)(?:\s\((?P<fnum>\d+)\)|)(?P<fext>\.[^.]+?|)$', re.IGNORECASE)
@@ -272,9 +275,33 @@ class mrs:
             r = re.match(p, i.filenameuc)
             rd = r.groupdict()
             f2num = int(rd.get('fnum')) if rd.get('fnum') else 0
-            f2name = rd.get('fname')
-            f2ext = rd.get('fext')
-            print('')
+            f2name = rd.get('fname', '')
+            f2ext = rd.get('fext', '')
+            print(f"{f2num} {f2name} {f2ext}")
+            if (f2name.lower() == fname.lower()) and (f2ext.lower() == fext.lower()):
+                if f2num == fnum:
+                    print('Exact match!')
+                    exact_match = (True, self.__files.index(i))
+                    continue
+                n.append(f2num)
+                continue
+        
+        if exact_match[0]:
+            fnum = 2
+            n.sort()
+            for i in n:
+                if i == fnum:
+                    fnum += 1
+                elif i != fnum:
+                    print(f"Found num available: {i}")
+                    break
+            print('Got n\'s:', n)
+            print(f'fnum is {fnum}')
+            return (exact_match[1], f'{fname} ({fnum}){fext}')
+        
+        return None
+        
+
     
     def add_file(self, name: str, /, final_name: str = None, on_dupe: mrs_dupe_behavior = mrs_dupe_behavior.KEEP_NEW):
         print('mrs.add_file():')
@@ -293,16 +320,27 @@ class mrs:
             raise UnicodeError(f'final_name contains a invalid file name: "{final_name}".') from None
         
         ###TODO: Verificar se há arquivos duplicados
-        self.__is_duplicate(final_name)
+        dup = self.__is_duplicate(final_name)
+        if dup:
+            if on_dupe == mrs_dupe_behavior.KEEP_OLD:
+                raise ValueError(f'Duplicate file for "{final_name}".')
+            elif on_dupe == mrs_dupe_behavior.KEEP_BOTH:
+                final_name = dup[1]
 
         f = _mrs_file()
         f.filenameuc = final_name
         
-        try: final_name = final_name.encode('mbcs')
+        try:
+            final_name = final_name.encode('mbcs')
+            f.filenameenc = 'mbcs'
         except:
-            try: final_name = final_name.encode('1252')
+            try:
+                final_name = final_name.encode('1252')
+                f.filenameenc = '1252'
             except:
-                try: final_name = final_name.encode('utf-8')
+                try:
+                    final_name = final_name.encode('utf-8')
+                    f.filenameenc = 'utf-8'
                 except:
                     raise UnicodeError('final_name contains invalid characters.')
         
@@ -355,6 +393,7 @@ class mrs:
         f.dh.compressed_size = len(cbuf)
         f.lh.compressed_size = f.dh.compressed_size
         print('Compressed size: %u' % f.dh.compressed_size)
+        f.lh.dump()
 
         f.lh.compression = f.dh.compression
 
@@ -366,9 +405,33 @@ class mrs:
         print('Offset is now: %u' % self.__mem.tell())
         ###TODO: Ação ao encontrar um arquivo duplicado
 
-        self.__files.append(f)
-        self.__hdr.dir_count += 1
-        self.__hdr.total_dir_count = self.__hdr.dir_count
+        if on_dupe == mrs_dupe_behavior.KEEP_NEW and dup:
+            self.__files[dup[0]] = f
+            self.__files[dup[0]].lh.dump()
+        else:
+            self.__files.append(f)
+            self.__hdr.dir_count += 1
+            self.__hdr.total_dir_count = self.__hdr.dir_count
+    
+    def add_folder(self, name: str, /, base_name: str = None, on_dupe: mrs_dupe_behavior = mrs_dupe_behavior.KEEP_NEW):
+        print(f'Adding folder "{name}"')
+        real_path = path.realpath(name)
+        print(f'Which real path is "{real_path}"')
+
+        if not path.exists(real_path):
+            raise FileNotFoundError(f'"{name}" was not found.')
+        if not path.isdir(real_path):
+            raise NotADirectoryError(f'"{name}" is not a directory.')
+        
+        fl = glob(f'**', root_dir=real_path, recursive=True)
+        for i in fl:
+            fname = f'{real_path}/{i}'
+            ffname = f'{base_name}/{i}' if base_name else i
+            print(fname)
+            if path.isdir(fname):
+                print(' <skipping dir>')
+                continue
+            self.add_file(fname, final_name=ffname, on_dupe=on_dupe)
 
     def dump(self):
         pass
