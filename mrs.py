@@ -13,6 +13,9 @@ import tempfile
 import time
 import zlib
 
+class NotAssigned:
+    pass
+
 ######## _dostime ##############################################
 class _dostime:
     class _time:
@@ -59,7 +62,7 @@ class _dostime:
         self.time.set_time(tm)
         self.date.set_date(tm)
     
-    def mktimedos(self) -> time.struct_time:
+    def mktimedos(self) -> time.time:
         tm = time.struct_time([
             int(self.date.year + 1980),
             int(self.date.month),
@@ -181,6 +184,112 @@ class _mrs_file:
         self.filenameuc = None  # File name in Unicode
         self.filenameenc = None # File name encoding
 
+class mrs_file:
+    def __init__(self, *, name, crc32, size, compressed_size, ftime, lhextra, dhextra, dhcomment):
+        self.__name            = name
+        self.__crc32           = crc32
+        self.__size            = size
+        self.__compressed_size = compressed_size
+        self.__ftime           = ftime
+        self.__lhextra         = lhextra
+        self.__dhextra         = dhextra
+        self.__dhcomment       = dhcomment
+    
+    @property
+    def name(self):
+        return self.__name
+
+    @name.setter
+    def name(self, v: str):
+        if not isinstance(v, str):
+            raise TypeError('name MUST be a string')
+        self.__name = v
+    
+    @property
+    def crc32(self):
+        return self.__crc32
+    
+    @property
+    def size(self):
+        return self.__size
+    
+    @property
+    def compressed_size(self):
+        return self.__compressed_size
+
+    @property
+    def ftime(self):
+        return self.__ftime
+
+    @ftime.setter
+    def ftime(self, v: time.time):
+        if not isinstance(v, time.time):
+            raise TypeError('ftime MUST be a float')
+        self.__ftime = v
+    
+    @property
+    def lh_extra(self):
+        return self.__lhextra
+
+    @lh_extra.setter
+    def lh_extra(self, v: bytearray|bytes|str|None):
+        if isinstance(v, bytearray):
+            print('<bytearray>')
+            self.__lhextra = bytes(v)
+        elif isinstance(v, bytes):
+            print('<bytes>')
+            self.__lhextra = bytes(v)
+        elif isinstance(v, str):
+            print('<str>')
+            self.__lhextra = v.encode('utf-8', 'ignore')
+        elif v == None:
+            self.__lhextra = None
+            print('<none>')
+        else:
+            raise TypeError('lh_extra MUST be a bytearray, bytes, str or None')
+    
+    @property
+    def dh_extra(self):
+        return self.__dhextra
+
+    @dh_extra.setter
+    def dh_extra(self, v: bytearray|bytes|str|None):
+        if isinstance(v, bytearray):
+            print('<bytearray>')
+            self.__dhextra = bytes(v)
+        elif isinstance(v, bytes):
+            print('<bytes>')
+            self.__dhextra = bytes(v)
+        elif isinstance(v, str):
+            print('<str>')
+            self.__dhextra = v.encode('utf-8', 'ignore')
+        elif v == None:
+            self.__dhextra = None
+            print('<none>')
+        else:
+            raise TypeError('dh_extra MUST be a bytearray, bytes, str or None')
+    
+    @property
+    def dh_comment(self):
+        return self.__dhcomment
+
+    @dh_comment.setter
+    def dh_comment(self, v: bytearray|bytes|str|None):
+        if isinstance(v, bytearray):
+            print('<bytearray>')
+            self.__dhcomment = bytes(v)
+        elif isinstance(v, bytes):
+            print('<bytes>')
+            self.__dhcomment = bytes(v)
+        elif isinstance(v, str):
+            print('<str>')
+            self.__dhcomment = v.encode('utf-8', 'ignore')
+        elif v == None:
+            self.__dhcomment = None
+            print('<none>')
+        else:
+            raise TypeError('dh_comment MUST be a bytearray, bytes, str or None')
+
 class mrs_dupe_behavior:
     KEEP_NEW  = 0
     KEEP_OLD  = 1
@@ -300,8 +409,6 @@ class mrs:
             return (exact_match[1], f'{fname} ({fnum}){fext}')
         
         return None
-        
-
     
     def add_file(self, name: str, /, final_name: str = None, on_dupe: mrs_dupe_behavior = mrs_dupe_behavior.KEEP_NEW):
         print('mrs.add_file():')
@@ -403,7 +510,6 @@ class mrs:
         f.dh.offset = self.__mem.tell()
         self.__mem.write(cbuf)
         print('Offset is now: %u' % self.__mem.tell())
-        ###TODO: Ação ao encontrar um arquivo duplicado
 
         if on_dupe == mrs_dupe_behavior.KEEP_NEW and dup:
             self.__files[dup[0]] = f
@@ -432,6 +538,76 @@ class mrs:
                 print(' <skipping dir>')
                 continue
             self.add_file(fname, final_name=ffname, on_dupe=on_dupe)
+    
+    # TODO: add_mrs
+    def add_mrs(self, name: str, /, base_name: str = None, on_dupe: mrs_dupe_behavior = mrs_dupe_behavior.KEEP_NEW):
+        print('Let\'s add files from a MRS archive')
+
+    def read(self, index: int) -> bytes:
+        if not isinstance(index, int):
+            raise TypeError('index MUST be an unsigned integer')
+        
+        if index >= self.__hdr.dir_count:
+            raise IndexError(f'Out of bound index, there\'s no file at index {index}')
+        
+        # print(f'Trying to read file at index {index}')
+        b = self.__mem_read(self.__files[index].dh.offset, self.__files[index].dh.compressed_size)
+        if self.__files[index].dh.compression == mrs.COMPRESSION_DEFLATE:
+            b = zlib.decompress(b)
+        return b
+    
+    def set_decryption(self, *, base_hdr=NotAssigned, local_hdr=NotAssigned, central_dir_hdr=NotAssigned, buffer=NotAssigned):
+        if base_hdr != NotAssigned:
+            if not callable(base_hdr):
+                raise TypeError('base_hdr MUST be a function')
+            self.__decrypt.base_hdr = base_hdr
+        
+        if local_hdr != NotAssigned:
+            if not callable(local_hdr):
+                raise TypeError('local_hdr MUST be a function')
+            self.__decrypt.local_hdr = local_hdr
+        
+        if central_dir_hdr != NotAssigned:
+            if not callable(central_dir_hdr):
+                raise TypeError('central_dir_hdr MUST be a function')
+            self.__decrypt.central_dir_hdr = central_dir_hdr
+        
+        if buffer != NotAssigned:
+            if not callable(buffer):
+                raise TypeError('buffer MUST be a function')
+            self.__decrypt.buffer = buffer
+    
+    def set_encryption(self, *, base_hdr=NotAssigned, local_hdr=NotAssigned, central_dir_hdr=NotAssigned, buffer=NotAssigned):
+        if base_hdr != NotAssigned:
+            if not callable(base_hdr):
+                raise TypeError('base_hdr MUST be a function')
+            self.__encrypt.base_hdr = base_hdr
+        
+        if local_hdr != NotAssigned:
+            if not callable(local_hdr):
+                raise TypeError('local_hdr MUST be a function')
+            self.__encrypt.local_hdr = local_hdr
+        
+        if central_dir_hdr != NotAssigned:
+            if not callable(central_dir_hdr):
+                raise TypeError('central_dir_hdr MUST be a function')
+            self.__encrypt.central_dir_hdr = central_dir_hdr
+        
+        if buffer != NotAssigned:
+            if not callable(buffer):
+                raise TypeError('buffer MUST be a function')
+            self.__encrypt.buffer = buffer
+    
+    def get_file(self, index: int) -> mrs_file:
+        if not isinstance(index, int):
+            raise TypeError('index MUST be an unsigned integer')
+
+        if index >= self.__hdr.dir_count:
+            raise IndexError(f'Out of bound index, there\'s no file at index {index}')
+        f = self.__files[index]
+        return mrs_file(name=f.filenameuc, crc32=f.dh.crc32, size=f.dh.uncompressed_size, compressed_size=f.dh.compressed_size, ftime=f.dh.filetime.mktimedos(), lhextra=f.lh.extra, dhextra=f.dh.extra, dhcomment=f.dh.comment)
+
+    # TODO: set_file
 
     def dump(self):
         pass
