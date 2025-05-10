@@ -9,9 +9,16 @@ import io
 import os
 from os import path
 import re
+import struct
 import tempfile
 import time
 import zlib
+
+class NotAMrsFileError(IOError):
+    super
+
+class InvalidMrsEncryptionError(IOError):
+    super
 
 class NotAssigned:
     pass
@@ -25,11 +32,17 @@ class _dostime:
             self.second = 0
             self.value  = 0
         
-        def set_time(self, tm: time.struct_time):
-            self.hour   = int(tm.tm_hour)
-            self.minute = int(tm.tm_min)
-            self.second = int(tm.tm_sec / 2)
-            self.value = (self.second & 0b11111) | ((self.minute & 0b111111) << 5) | ((self.hour & 0b11111) << 11)
+        def set_time(self, tm: time.struct_time|int):
+            if isinstance(tm, time.struct_time):
+                self.hour   = int(tm.tm_hour)
+                self.minute = int(tm.tm_min)
+                self.second = int(tm.tm_sec / 2)
+                self.value = (self.second & 0b11111) | ((self.minute & 0b111111) << 5) | ((self.hour & 0b11111) << 11)
+            elif isinstance(tm, int):
+                self.hour   = int((tm & 0b11111) >> 11)
+                self.minute = int((tm & 0b111111) >> 5)
+                self.second = int(tm & 0b11111)
+                self.value  = tm
         
     class _date:
         def __init__(self):
@@ -38,11 +51,17 @@ class _dostime:
             self.day   = 0
             self.value = 0
         
-        def set_date(self, tm: time.struct_time):
-            self.year  = int(tm.tm_year - 1980)
-            self.month = int(tm.tm_mon)
-            self.day   = int(tm.tm_mday)
-            self.value = (self.day & 0b11111) | ((self.month & 0b1111) << 5) | ((self.year & 0b1111111) << 9)
+        def set_date(self, tm: time.struct_time|int):
+            if isinstance(tm, time.struct_time):
+                self.year  = int(tm.tm_year - 1980)
+                self.month = int(tm.tm_mon)
+                self.day   = int(tm.tm_mday)
+                self.value = (self.day & 0b11111) | ((self.month & 0b1111) << 5) | ((self.year & 0b1111111) << 9)
+            elif isinstance(tm, int):
+                self.year  = int((tm & 0b1111111) >> 9)
+                self.month = int((tm & 0b1111) >> 5)
+                self.day   = int(tm & 0b11111)
+                self.value = tm
         
     def __init__(self):
         self.time = self._time()
@@ -82,6 +101,8 @@ class _mrs_hdr:
     
     size = 22
 
+    __fmt = "<IHHHHIIH"
+
     def __init__(self):
         self.signature       = 0
         self.disk_num        = 0
@@ -91,6 +112,17 @@ class _mrs_hdr:
         self.dir_size        = 0
         self.dir_offset      = 0
         self.comment_length  = 0
+
+    def __bytes__(self) -> bytes:
+        b = struct.pack(self.__fmt, self.signature,
+                                    self.disk_num,
+                                    self.disk_start,
+                                    self.dir_count,
+                                    self.total_dir_count,
+                                    self.dir_size,
+                                    self.dir_offset,
+                                    self.comment_length)
+        return b
     
     def dump(self):
         print('_mrs_hdr dump (%u):' % self.size)
@@ -103,8 +135,25 @@ class _mrs_hdr:
         print('  dir_offset      %08x' % self.dir_offset)
         print('  comment_length  %u' % self.comment_length)
     
-    def read(self, f):
-        pass
+    def read(self, f: io.BufferedIOBase|bytes|bytearray):
+        b = NotAssigned
+        if isinstance(f, io.BufferedIOBase):
+            b = f.read(self.size)
+        elif isinstance(f, bytes):
+            b = f
+        elif isinstance(f, bytearray):
+            b = bytes(f)
+        else:
+            raise TypeError(f'"f" MUST be a io.BufferedIOBase, bytes or bytearray.')
+        
+        ( self.signature,
+          self.disk_num,
+          self.disk_start,
+          self.dir_count,
+          self.total_dir_count,
+          self.dir_size,
+          self.dir_offset,
+          self.comment_length ) = struct.unpack_from(self.__fmt, b)
 
     def write(self, f):
         pass
@@ -116,6 +165,8 @@ class _mrs_local_hdr:
     VER     = 0x14
 
     size = 30
+
+    __fmt = "<IHHHHHIIIHH"
 
     def __init__(self):
         self.signature         = 0
@@ -143,8 +194,38 @@ class _mrs_local_hdr:
         print('  uncompressed_size %u' % self.uncompressed_size)
         print('  filename_length   %u' % self.filename_length)
         print('  extra_length      %u' % self.extra_length)
-        print('  filename          %s' % self.filename if self.filename else '<empty>')
-        print('  extra             %.*s' % (self.extra_length if self.extra else 7, self.extra if self.extra else '<empty>'))
+        if self.filename:
+            print('  filename          %s' % self.filename)
+        if self.extra:
+            print('  extra             %s' % self.extra)
+    
+    def read(self, f: io.BufferedIOBase|bytes|bytearray):
+        b = NotAssigned
+        if isinstance(f, io.BufferedIOBase):
+            b = f.read(self.size)
+        elif isinstance(f, bytes):
+            b = f
+        elif isinstance(f, bytearray):
+            b = bytes(f)
+        else:
+            raise TypeError(f'"f" MUST be a io.BufferedIOBase, bytes or bytearray.')
+        
+        ( self.signature,
+          self.version,
+          self.flags,
+          self.compression,
+          _ftime,
+          _fdate,
+          self.crc32,
+          self.compressed_size,
+          self.uncompressed_size,
+          self.filename_length,
+          self.extra_length ) = struct.unpack_from(self.__fmt, b)
+        
+        offset = self.size
+
+        self.filetime.time.set_time(_ftime)
+        self.filetime.date.set_date(_fdate)
 
 ######## _mrs_central_dir_hdr ##################################
 class _mrs_central_dir_hdr:
@@ -154,6 +235,8 @@ class _mrs_central_dir_hdr:
     VER_NEEDED = 0x14
 
     size = 46
+
+    __fmt = "<IHHHHHHIIIHHHHHII"
 
     def __init__(self):
         self.signature         = 0
@@ -175,6 +258,77 @@ class _mrs_central_dir_hdr:
         self.filename          = None
         self.extra             = None
         self.comment           = None
+    
+    def read(self, f: io.BufferedIOBase|bytes|bytearray):
+        b = NotAssigned
+        if isinstance(f, io.BufferedIOBase):
+            b = f.read(self.size)
+        elif isinstance(f, bytes):
+            b = f
+        elif isinstance(f, bytearray):
+            b = bytes(f)
+        else:
+            raise TypeError(f'"f" MUST be a io.BufferedIOBase, bytes or bytearray.')
+        
+        ( self.signature,
+          self.version_made,
+          self.version_needed,
+          self.flags,
+          self.compression,
+          _ftime,
+          _fdate,
+          self.crc32,
+          self.compressed_size,
+          self.uncompressed_size,
+          self.filename_length,
+          self.extra_length,
+          self.comment_length,
+          self.disk_start,
+          self.int_attr,
+          self.ext_attr,
+          self.offset ) = struct.unpack_from(self.__fmt, b)
+        
+        offset = self.size
+        
+        self.filetime.time.set_time(_ftime)
+        self.filetime.date.set_date(_fdate)
+
+        if self.filename_length:
+            self.filename = b[offset:(offset + self.filename_length)]
+            offset += self.filename_length
+        
+        if self.extra_length:
+            self.extra = b[offset:(offset + self.extra_length)]
+            offset += self.extra_length
+        
+        if self.comment_length:
+            self.comment = b[offset:(offset + self.comment_length)]
+    
+    def dump(self):
+        print('_mrs_central_dir_hdr dump (%u):' % self.size)
+        print('  signature         %08x' % self.signature)
+        print('  version_made      %04x' % self.version_made)
+        print('  version_needed    %04x' % self.version_needed)
+        print('  flags             %04x' % self.flags)
+        print('  compression       %04x' % self.compression)
+        print('  mod. time         %04x' % self.filetime.time.value)
+        print('  mod. date         %04x' % self.filetime.date.value)
+        print('  crc32             %08x' % self.crc32)
+        print('  compressed_size   %u' % self.compressed_size)
+        print('  uncompressed_size %u' % self.uncompressed_size)
+        print('  filename_length   %u' % self.filename_length)
+        print('  extra_length      %u' % self.extra_length)
+        print('  comment_length    %u' % self.comment_length)
+        print('  disk_start        %04x' % self.disk_start)
+        print('  int_attr          %04x' % self.int_attr)
+        print('  ext_attr          %08x' % self.ext_attr)
+        print('  offset            %08x' % self.offset)
+        if self.filename:
+            print('  filename          %s' % self.filename)
+        if self.extra:
+            print('  extra             %s' % self.extra)
+        if self.comment:
+            print('  comment           %s' % self.comment)
 
 ######## _mrs_file #############################################
 class _mrs_file:
@@ -183,6 +337,11 @@ class _mrs_file:
         self.dh = _mrs_central_dir_hdr()
         self.filenameuc = None  # File name in Unicode
         self.filenameenc = None # File name encoding
+
+class mrs_signature_where:
+    BASE_HDR        = 1
+    LOCAL_HDR       = 2
+    CENTRAL_DIR_HDR = 3
 
 class mrs_file:
     def __init__(self, *, name, crc32, size, compressed_size, ftime, lhextra, dhextra, dhcomment):
@@ -316,15 +475,47 @@ class mrs:
     COMPRESSION_DEFLATE = 8
 
     def __init__(self):
-        self.__hdr     = _mrs_hdr()
         self.__files: list[_mrs_file] = []
-        self.__mem     = tempfile.TemporaryFile('w+b')
-        self.__decrypt = mrs_encryption()
-        self.__encrypt = mrs_encryption()
+        self.__hdr      = _mrs_hdr()
+        self.__mem      = tempfile.TemporaryFile('w+b')
+        self.__decrypt  = mrs_encryption()
+        self.__encrypt  = mrs_encryption()
+        self.__sigcheck = None
     
     def __del__(self):
         if not self.__mem.closed:
             self.__mem.close()
+    
+    def __mrs_default_decrypt(self, buffer: bytes, size: int):
+        buf = bytearray(buffer)
+        for i in range(size):
+            c = buf[i]
+            c = ((c >> 3) | (c << 5)) & 0xFF
+            buf[i] = (~c) & 0xFF
+        return bytes(buf)
+    
+    def __mrs_default_encrypt(self, buffer: bytes, size: int):
+        buf = bytearray(buffer)
+        for i in range(size):
+            c = (~buf[i]) & 0xFF
+            c = ((c << 3) | (c >> 5)) & 0xFF
+            buf[i] = c
+        return bytes(buf)
+    
+    def __mrs_default_signatures(self, where: int, signature: int) -> bool:
+        if not isinstance(signature, int):
+            return False
+
+        if where == mrs_signature_where.BASE_HDR:
+            if signature in (_mrs_hdr.MAGIC1, _mrs_hdr.MAGIC2, _mrs_hdr.MAGIC3):
+                return True
+        elif where == mrs_signature_where.LOCAL_HDR:
+            if signature in (_mrs_local_hdr.MAGIC1, _mrs_local_hdr.MAGIC2):
+                return True
+        elif where == mrs_signature_where.CENTRAL_DIR_HDR:
+            if signature in (_mrs_central_dir_hdr.MAGIC1, _mrs_central_dir_hdr.MAGIC2):
+                return True
+        return False
         
     def __is_valid_filename(self, f: str):
         invalid_names = [
@@ -355,12 +546,12 @@ class mrs:
         if offset >= sz:
             raise BufferError('Offset %08x(%u) is invalid.')
         self.__mem.seek(offset, io.SEEK_SET)
-        buf = self.__mem.read(bufsize - offset)
+        buf = self.__mem.read(bufsize)
         self.__mem.seek(0, io.SEEK_END)
         return buf
     
     def __is_duplicate(self, name):
-        print(name)
+        # print(name)
         fname = ''
         fext = ''
         fnum = 0
@@ -375,21 +566,21 @@ class mrs:
             fname = rd.get('fname')
             fext = rd.get('fext')
 
-        print(f'Name: {fname}')
-        print(f'Ext:  {fext}')
-        print(f'Num:  {fnum}')
+        # print(f'Name: {fname}')
+        # print(f'Ext:  {fext}')
+        # print(f'Num:  {fnum}')
 
         for i in self.__files:
-            print(i.filenameuc)
+            # print(i.filenameuc)
             r = re.match(p, i.filenameuc)
             rd = r.groupdict()
             f2num = int(rd.get('fnum')) if rd.get('fnum') else 0
             f2name = rd.get('fname', '')
             f2ext = rd.get('fext', '')
-            print(f"{f2num} {f2name} {f2ext}")
+            # print(f"{f2num} {f2name} {f2ext}")
             if (f2name.lower() == fname.lower()) and (f2ext.lower() == fext.lower()):
                 if f2num == fnum:
-                    print('Exact match!')
+                    # print('Exact match!')
                     exact_match = (True, self.__files.index(i))
                     continue
                 n.append(f2num)
@@ -402,10 +593,10 @@ class mrs:
                 if i == fnum:
                     fnum += 1
                 elif i != fnum:
-                    print(f"Found num available: {i}")
+                    # print(f"Found num available: {i}")
                     break
-            print('Got n\'s:', n)
-            print(f'fnum is {fnum}')
+            # print('Got n\'s:', n)
+            # print(f'fnum is {fnum}')
             return (exact_match[1], f'{fname} ({fnum}){fext}')
         
         return None
@@ -449,7 +640,7 @@ class mrs:
                     final_name = final_name.encode('utf-8')
                     f.filenameenc = 'utf-8'
                 except:
-                    raise UnicodeError('final_name contains invalid characters.')
+                    raise UnicodeError('Unknown encoding for final_name.')
         
         print(f'Final name will be "{final_name}"')
 
@@ -459,7 +650,12 @@ class mrs:
         if path.isdir(real_name):
             raise IsADirectoryError(f'"{name}" is a directory.')
 
-        fp = open(real_name, 'rb')
+        fp = None
+        try:
+            fp = open(real_name, 'rb')
+        except:
+            raise IOError(f'Cannot open "{name}".')
+        
         ftime = path.getmtime(fp.fileno())
         fsize = path.getsize(fp.fileno())
 
@@ -487,7 +683,8 @@ class mrs:
             f.dh.crc32 = zlib.crc32(buf)
             f.lh.crc32 = f.dh.crc32
             try:
-                cbuf = zlib.compress(buf, 9)
+                cobj = zlib.compressobj(9, 8, -15)
+                cbuf = cobj.compress(buf)
             except:
                 cbuf = buf
                 f.dh.compression = mrs.COMPRESSION_STORE
@@ -541,63 +738,228 @@ class mrs:
     
     # TODO: add_mrs
     def add_mrs(self, name: str, /, base_name: str = None, on_dupe: mrs_dupe_behavior = mrs_dupe_behavior.KEEP_NEW):
-        print('Let\'s add files from a MRS archive')
+        # print('Let\'s add files from a MRS archive')
+        realpath = path.realpath(name)
+        # print(f'"{name}", which real path is "{realpath}"')
+
+        if not path.exists(realpath):
+            raise FileNotFoundError(f'"{name}" was not found.')
+        
+        if path.isdir(realpath):
+            raise IsADirectoryError(f'"{name}" is a directory.')
+        
+        fp = None
+        try:
+            fp = open(realpath, 'rb')
+        except:
+            raise IOError(f'Cannot open "{name}".')
+        
+        fp.seek(-22, io.SEEK_END)
+        
+        _decrypt = mrs_encryption()
+        _decrypt.base_hdr        = self.__decrypt.base_hdr if self.__decrypt.base_hdr else self.__mrs_default_decrypt
+        _decrypt.local_hdr       = self.__decrypt.local_hdr if self.__decrypt.local_hdr else _decrypt.base_hdr
+        _decrypt.central_dir_hdr = self.__decrypt.central_dir_hdr if self.__decrypt.central_dir_hdr else _decrypt.base_hdr
+        _decrypt.buffer          = self.__decrypt.buffer
+        
+        hdr = _mrs_hdr()
+
+        hdr_b = fp.read(_mrs_hdr.size)
+        hdr_b = _decrypt.base_hdr(hdr_b, _mrs_hdr.size)
+
+        hdr.read(hdr_b)
+
+        if (not self.__mrs_default_signatures(mrs_signature_where.BASE_HDR, hdr.signature)) and (not self.__sigcheck or not self.__sigcheck(mrs_signature_where.BASE_HDR, hdr.signature)):
+            raise NotAMrsFileError(f'"{name}" is not a MRS file or the decryption is incorrect.')
+
+        # print('  Dir size: %u' % hdr.dir_size)
+        # print('Dir offset: %08x' % hdr.dir_offset)
+
+        fp.seek(hdr.dir_offset)
+        cdir_b = fp.read(hdr.dir_size)
+
+        if len(cdir_b) != hdr.dir_size:
+            raise NotAMrsFileError(f'"{name}" is not a MRS file or is corrupted.')
+        
+        _files = []
+        cdir_b = _decrypt.central_dir_hdr(cdir_b, hdr.dir_size)
+        offset = 0
+        for i in range(hdr.dir_count):
+            f = _mrs_file()
+            # print(f'Reading file {i} header')
+            cdir = _mrs_central_dir_hdr()
+            f.dh.read(cdir_b)
+
+            if (not self.__mrs_default_signatures(mrs_signature_where.CENTRAL_DIR_HDR, f.dh.signature)) and (not self.__sigcheck or not self.__sigcheck(mrs_signature_where.CENTRAL_DIR_HDR, f.dh.signature)):
+                raise InvalidMrsEncryptionError(f'Invalid decryption for "{name}".')
+            
+            try:
+                f.filenameuc = f.dh.filename.decode('mbcs')
+                f.filenameenc = 'mbcs'
+            except:
+                try:
+                    f.filenameuc = f.dh.filename.decode('1252')
+                    f.filenameenc = '1252'
+                except:
+                    try:
+                        f.filenameuc = f.dh.filename.decode('utf-8')
+                        f.filenameenc = 'utf-8'
+                    except:
+                        raise UnicodeError(f'"{name}": Unknown encoding for {f.dh.filename} filename.')
+            
+            if base_name:
+                f.filenameuc = f'{base_name}/{f.filenameuc}'
+                f.dh.filename = f.filenameuc.encode(f.filenameenc)
+
+            try:
+                self.__is_valid_filename(f.filenameuc)
+            except:
+                raise UnicodeError(f'"{name}": "{f.filenameuc}" contains a invalid file name.') from None
+            
+            fp.seek(f.dh.offset)
+            lhdr_b = fp.read(_mrs_local_hdr.size) # Local header bytes
+            lhdr_b = _decrypt.local_hdr(lhdr_b, _mrs_local_hdr.size)
+
+            f.lh.read(lhdr_b)
+            # lhdr = _mrs_local_hdr()
+            # lhdr.read(lhdr_b)
+            
+            if (not self.__mrs_default_signatures(mrs_signature_where.LOCAL_HDR, f.lh.signature)) and (not self.__sigcheck or not self.__sigcheck(mrs_signature_where.LOCAL_HDR, f.lh.signature)):
+                raise InvalidMrsEncryptionError(f'Invalid decryption for "{name}".')
+            
+            # Let's skip file name for local header
+            fp.seek(f.lh.filename_length, io.SEEK_CUR)
+            if f.lh.extra_length:
+                _extra = fp.read(f.lh.extra_length)
+                f.lh.extra = self.__mrs_default_decrypt(_extra, f.lh.extra_length)
+            
+            # Now let's read the file content
+            # NOTE: Should it give an error for 'compression' field value different from 0 and 8 ?
+            # We skip zero-byte files for decompression and/or reading
+            f.dh.offset = 0
+            if f.dh.compressed_size != 0:
+                f.dh.offset = self.__mem.tell()
+                # print(f.dh.offset)
+                # print(f.dh.compressed_size)
+                fbuf = fp.read(f.dh.compressed_size)
+                # TODO: Decrypt the file buffer if there's a decryption routine for it
+                if f.dh.compression == self.COMPRESSION_DEFLATE:
+                    # print('Compression method: DEFLATE')
+                    # fbuf = fp.read(f.dh.compressed_size)
+                    # print(fbuf)
+                    try:
+                        ffbuf = zlib.decompress(fbuf, -15)
+                    except:
+                        raise zlib.error(f'Invalid DEFLATE stream at "{name}" for the archived file named "{f.dh.filename}".')
+                    self.__mem.seek(0, io.SEEK_END)
+                    self.__mem.write(fbuf)
+                else:
+                    # print('Compression method: STORE')
+                    # fbuf = fp.read(f.dh.compressed_size)
+                    self.__mem.seek(0, io.SEEK_END)
+                    self.__mem.write(fbuf)
+                    # print(fbuf)
+
+            dup = self.__is_duplicate(f.filenameuc)
+            if dup:
+                if on_dupe == mrs_dupe_behavior.KEEP_OLD:
+                    raise ValueError(f'Duplicate file for "{f.filenameuc}" in "{name}".')
+                elif on_dupe == mrs_dupe_behavior.KEEP_BOTH:
+                    f.filenameuc = dup[1]
+
+            # print(offset, f'({f.dh.size}, {f.dh.filename_length}, {f.dh.extra_length}, {f.dh.comment_length})')
+            offset_next = (f.dh.size + f.dh.filename_length + f.dh.extra_length + f.dh.comment_length)
+
+            # Update file name
+            f.dh.filename = f.filenameuc.encode(f.filenameenc)
+            f.dh.filename_length = len(f.dh.filename)
+            f.lh.filename = f.dh.filename
+            f.lh.filename_length = len(f.lh.filename)
+            
+            _files.append((f, dup))
+
+            cdir_b = cdir_b[offset_next:]
+        
+        # print('ALL FILES OK!')
+
+        for (i,j) in _files:
+            if j and on_dupe==mrs_dupe_behavior.KEEP_NEW:
+                # print('Found duplicate')
+                self.__files[j[0]] = i
+            else:
+                # print(i.filenameuc, i.filenameenc)
+                # print(i.dh.dump())
+                # print(i.lh.dump())
+                self.__files.append(i)
+                self.__hdr.dir_count += 1
+                self.__hdr.total_dir_count = self.__hdr.dir_count
+        
+        fp.close()
 
     def read(self, index: int) -> bytes:
         if not isinstance(index, int):
-            raise TypeError('index MUST be an unsigned integer')
+            raise TypeError('index MUST be an unsigned integer.')
         
         if index >= self.__hdr.dir_count:
-            raise IndexError(f'Out of bound index, there\'s no file at index {index}')
+            raise IndexError(f'Out of bound index, there\'s no file at index {index}.')
         
         # print(f'Trying to read file at index {index}')
         b = self.__mem_read(self.__files[index].dh.offset, self.__files[index].dh.compressed_size)
+        # print(self.__files[index].dh.offset, self.__files[index].dh.compressed_size, b)
         if self.__files[index].dh.compression == mrs.COMPRESSION_DEFLATE:
-            b = zlib.decompress(b)
+            b = zlib.decompress(b, -15)
         return b
     
     def set_decryption(self, *, base_hdr=NotAssigned, local_hdr=NotAssigned, central_dir_hdr=NotAssigned, buffer=NotAssigned):
         if base_hdr != NotAssigned:
             if not callable(base_hdr):
-                raise TypeError('base_hdr MUST be a function')
+                raise TypeError('"base_hdr" MUST be a function.')
             self.__decrypt.base_hdr = base_hdr
         
         if local_hdr != NotAssigned:
             if not callable(local_hdr):
-                raise TypeError('local_hdr MUST be a function')
+                raise TypeError('"local_hdr" MUST be a function.')
             self.__decrypt.local_hdr = local_hdr
         
         if central_dir_hdr != NotAssigned:
             if not callable(central_dir_hdr):
-                raise TypeError('central_dir_hdr MUST be a function')
+                raise TypeError('"central_dir_hdr" MUST be a function.')
             self.__decrypt.central_dir_hdr = central_dir_hdr
         
         if buffer != NotAssigned:
             if not callable(buffer):
-                raise TypeError('buffer MUST be a function')
+                raise TypeError('"buffer" MUST be a function.')
             self.__decrypt.buffer = buffer
     
     def set_encryption(self, *, base_hdr=NotAssigned, local_hdr=NotAssigned, central_dir_hdr=NotAssigned, buffer=NotAssigned):
         if base_hdr != NotAssigned:
             if not callable(base_hdr):
-                raise TypeError('base_hdr MUST be a function')
+                raise TypeError('"base_hdr" MUST be a function.')
             self.__encrypt.base_hdr = base_hdr
         
         if local_hdr != NotAssigned:
             if not callable(local_hdr):
-                raise TypeError('local_hdr MUST be a function')
+                raise TypeError('"local_hdr" MUST be a function.')
             self.__encrypt.local_hdr = local_hdr
         
         if central_dir_hdr != NotAssigned:
             if not callable(central_dir_hdr):
-                raise TypeError('central_dir_hdr MUST be a function')
+                raise TypeError('"central_dir_hdr" MUST be a function.')
             self.__encrypt.central_dir_hdr = central_dir_hdr
         
         if buffer != NotAssigned:
             if not callable(buffer):
-                raise TypeError('buffer MUST be a function')
+                raise TypeError('"buffer" MUST be a function.')
             self.__encrypt.buffer = buffer
     
+    def set_signature_check(self, f):
+        if f != None and not callable(f):
+            raise TypeError(f'"f" MUST be a function.')
+        self.__sigcheck = f
+    
+    def get_file_count(self) -> int:
+        return self.__hdr.dir_count
+
     def get_file(self, index: int) -> mrs_file:
         if not isinstance(index, int):
             raise TypeError('index MUST be an unsigned integer')
@@ -608,6 +970,3 @@ class mrs:
         return mrs_file(name=f.filenameuc, crc32=f.dh.crc32, size=f.dh.uncompressed_size, compressed_size=f.dh.compressed_size, ftime=f.dh.filetime.mktimedos(), lhextra=f.lh.extra, dhextra=f.dh.extra, dhcomment=f.dh.comment)
 
     # TODO: set_file
-
-    def dump(self):
-        pass

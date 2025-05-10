@@ -2,3 +2,4 @@ test*.py
 tests/
 __pycache__/
 test*.mrs
+/.vscode
