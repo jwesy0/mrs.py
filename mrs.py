@@ -403,7 +403,8 @@ class mrs_signature_where:
     CENTRAL_DIR_HDR = 3
 
 class mrs_file:
-    def __init__(self, *, name, crc32, size, compressed_size, ftime, lhextra, dhextra, dhcomment):
+    def __init__(self, *, index, name, crc32, size, compressed_size, ftime, lhextra, dhextra, dhcomment):
+        self.__index           = index
         self.__name            = name
         self.__crc32           = crc32
         self.__size            = size
@@ -413,6 +414,10 @@ class mrs_file:
         self.__dhextra         = dhextra
         self.__dhcomment       = dhcomment
     
+    @property
+    def index(self):
+        return self.__index
+
     @property
     def name(self):
         return self.__name
@@ -1017,7 +1022,7 @@ class mrs:
         if index >= self.__hdr.dir_count:
             raise IndexError(f'Out of bound index, there\'s no file at index {index}')
         f = self.__files[index]
-        return mrs_file(name=f.filenameuc, crc32=f.dh.crc32, size=f.dh.uncompressed_size, compressed_size=f.dh.compressed_size, ftime=f.dh.filetime.mktimedos(), lhextra=f.lh.extra, dhextra=f.dh.extra, dhcomment=f.dh.comment)
+        return mrs_file(index=index, name=f.filenameuc, crc32=f.dh.crc32, size=f.dh.uncompressed_size, compressed_size=f.dh.compressed_size, ftime=f.dh.filetime.mktimedos(), lhextra=f.lh.extra, dhextra=f.dh.extra, dhcomment=f.dh.comment)
 
     def set_file(self, index: int, file: mrs_file):
         if not isinstance(index, int):
@@ -1043,3 +1048,7 @@ class mrs:
         self.__files[index].dh.extra = file.dh_extra
         # dhcomment
         self.__files[index].dh.comment = file.dh_comment
+    
+    def get_files(self):
+        for i in self.__files:
+            yield mrs_file(index=self.__files.index(i), name=i.filenameuc, crc32=i.dh.crc32, compressed_size=i.dh.compressed_size, size=i.dh.uncompressed_size, ftime=i.dh.filetime.mktimedos(), lhextra=i.lh.extra, dhextra=i.dh.extra, dhcomment=i.dh.comment)
