@@ -23,6 +23,59 @@ class InvalidMrsEncryptionError(IOError):
 class NotAssigned:
     pass
 
+def _dec_str(s: bytes):
+    try:
+        ss = s.decode('mbcs')
+        return (ss, 'mbcs')
+    except:
+        try:
+            ss = s.decode('1252')
+            return (ss, '1252')
+        except:
+            try:
+                ss = s.decode('utf-8')
+                return (ss, 'utf-8')
+            except:
+                raise UnicodeError(f'Unknown encoding.')
+
+def _enc_str(s: str):
+    try:
+        ss = s.encode('mbcs')
+        return (ss, 'mbcs')
+    except:
+        try:
+            ss = s.encode('1252')
+            return (ss, '1252')
+        except:
+            try:
+                ss = s.encode('utf-8')
+                return (ss, 'utf-8')
+            except:
+                raise UnicodeError('Unknown encoding.')
+
+def _is_valid_filename(f: str):
+    invalid_names = [
+        '.',    '..',
+        'CON',  'PRN',  'AUX',  'NUL',  'COM0', 'COM1', 'COM2', 'COM3',
+        'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'COM¹', 'COM²',
+        'COM³', 'LPT0', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6',
+        'LPT7', 'LPT8', 'LPT9', 'LPT¹', 'LPT²', 'LPT³'
+    ]
+    invalid_chars = ['<', '>', ':', '"', '|', '?', '*']
+    invalid_chars.extend(range(1, 32))
+
+    for i in invalid_chars:
+        if type(i) == int:
+            i = chr(i)
+        if i in f:
+            raise UnicodeError
+
+    dirs = f.split('\\')
+    for i in dirs:
+        fname = path.splitext(i)[0]
+        if fname.upper() in invalid_names:
+            raise UnicodeError
+
 ######## _dostime ##############################################
 class _dostime:
     class _time:
@@ -67,7 +120,7 @@ class _dostime:
         self.time = self._time()
         self.date = self._date()
     
-    def dostime(self, t: float = None):
+    def dostime(self, t: float|None = None):
         tm = None
 
         if t != None:
@@ -188,7 +241,7 @@ class _mrs_local_hdr:
         print('  version           %04x' % self.version)
         print('  flags             %04x' % self.flags)
         print('  compression       %04x' % self.compression)
-        print('  filetime          %02x %02x' % (self.filetime.time.value, self.filetime.date.value))
+        print('  filetime          %04x %04x' % (self.filetime.time.value, self.filetime.date.value))
         print('  crc32             %08x' % self.crc32)
         print('  compressed_size   %u' % self.compressed_size)
         print('  uncompressed_size %u' % self.uncompressed_size)
@@ -337,6 +390,12 @@ class _mrs_file:
         self.dh = _mrs_central_dir_hdr()
         self.filenameuc = None  # File name in Unicode
         self.filenameenc = None # File name encoding
+    
+    def dump(self):
+        self.lh.dump()
+        self.dh.dump()
+        print('Filename: %s' % self.filenameuc)
+        print('Encoding: %s' % self.filenameenc)
 
 class mrs_signature_where:
     BASE_HDR        = 1
@@ -362,6 +421,10 @@ class mrs_file:
     def name(self, v: str):
         if not isinstance(v, str):
             raise TypeError('name MUST be a string')
+        try:
+            _is_valid_filename(v)
+        except:
+            raise UnicodeError(f'v contains an invalid file name: "{v}".') from None
         self.__name = v
     
     @property
@@ -516,29 +579,6 @@ class mrs:
             if signature in (_mrs_central_dir_hdr.MAGIC1, _mrs_central_dir_hdr.MAGIC2):
                 return True
         return False
-        
-    def __is_valid_filename(self, f: str):
-        invalid_names = [
-            '.',    '..',
-            'CON',  'PRN',  'AUX',  'NUL',  'COM0', 'COM1', 'COM2', 'COM3',
-            'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'COM¹', 'COM²',
-            'COM³', 'LPT0', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6',
-            'LPT7', 'LPT8', 'LPT9', 'LPT¹', 'LPT²', 'LPT³'
-        ]
-        invalid_chars = ['<', '>', ':', '"', '|', '?', '*']
-        invalid_chars.extend(range(1, 32))
-
-        for i in invalid_chars:
-            if type(i) == int:
-                i = chr(i)
-            if i in f:
-                raise UnicodeError
-
-        dirs = f.split('\\')
-        for i in dirs:
-            fname = path.splitext(i)[0]
-            if fname.upper() in invalid_names:
-                raise UnicodeError
     
     def __mem_read(self, offset: int, bufsize: int) -> bytes:
         self.__mem.seek(0, io.SEEK_END)
@@ -613,9 +653,9 @@ class mrs:
         
         final_name = final_name.replace('/', '\\')
         try:
-            self.__is_valid_filename(final_name)
+            _is_valid_filename(final_name)
         except:
-            raise UnicodeError(f'final_name contains a invalid file name: "{final_name}".') from None
+            raise UnicodeError(f'final_name contains an invalid file name: "{final_name}".')# from None
         
         ###TODO: Verificar se há arquivos duplicados
         dup = self.__is_duplicate(final_name)
@@ -627,20 +667,25 @@ class mrs:
 
         f = _mrs_file()
         f.filenameuc = final_name
-        
+
         try:
-            final_name = final_name.encode('mbcs')
-            f.filenameenc = 'mbcs'
+            (final_name, f.filenameenc) = _enc_str(final_name)
         except:
-            try:
-                final_name = final_name.encode('1252')
-                f.filenameenc = '1252'
-            except:
-                try:
-                    final_name = final_name.encode('utf-8')
-                    f.filenameenc = 'utf-8'
-                except:
-                    raise UnicodeError('Unknown encoding for final_name.')
+            raise UnicodeError('Unknown encoding for final_name.')
+        
+        # try:
+        #     final_name = final_name.encode('mbcs')
+        #     f.filenameenc = 'mbcs'
+        # except:
+        #     try:
+        #         final_name = final_name.encode('1252')
+        #         f.filenameenc = '1252'
+        #     except:
+        #         try:
+        #             final_name = final_name.encode('utf-8')
+        #             f.filenameenc = 'utf-8'
+        #         except:
+        #             raise UnicodeError('Unknown encoding for final_name.')
         
         print(f'Final name will be "{final_name}"')
 
@@ -697,7 +742,6 @@ class mrs:
         f.dh.compressed_size = len(cbuf)
         f.lh.compressed_size = f.dh.compressed_size
         print('Compressed size: %u' % f.dh.compressed_size)
-        f.lh.dump()
 
         f.lh.compression = f.dh.compression
 
@@ -707,6 +751,8 @@ class mrs:
         f.dh.offset = self.__mem.tell()
         self.__mem.write(cbuf)
         print('Offset is now: %u' % self.__mem.tell())
+        
+        f.dump()
 
         if on_dupe == mrs_dupe_behavior.KEEP_NEW and dup:
             self.__files[dup[0]] = f
@@ -794,25 +840,29 @@ class mrs:
                 raise InvalidMrsEncryptionError(f'Invalid decryption for "{name}".')
             
             try:
-                f.filenameuc = f.dh.filename.decode('mbcs')
-                f.filenameenc = 'mbcs'
+                (f.filenameuc, f.filenameenc) = _dec_str(f.dh.filename)
             except:
-                try:
-                    f.filenameuc = f.dh.filename.decode('1252')
-                    f.filenameenc = '1252'
-                except:
-                    try:
-                        f.filenameuc = f.dh.filename.decode('utf-8')
-                        f.filenameenc = 'utf-8'
-                    except:
-                        raise UnicodeError(f'"{name}": Unknown encoding for {f.dh.filename} filename.')
+                raise UnicodeError(f'"{name}": Unknown encoding for {f.dh.filename} filename.') from None
+            # try:
+            #     f.filenameuc = f.dh.filename.decode('mbcs')
+            #     f.filenameenc = 'mbcs'
+            # except:
+            #     try:
+            #         f.filenameuc = f.dh.filename.decode('1252')
+            #         f.filenameenc = '1252'
+            #     except:
+            #         try:
+            #             f.filenameuc = f.dh.filename.decode('utf-8')
+            #             f.filenameenc = 'utf-8'
+            #         except:
+            #             raise UnicodeError(f'"{name}": Unknown encoding for {f.dh.filename} filename.')
             
             if base_name:
                 f.filenameuc = f'{base_name}/{f.filenameuc}'
                 f.dh.filename = f.filenameuc.encode(f.filenameenc)
 
             try:
-                self.__is_valid_filename(f.filenameuc)
+                _is_valid_filename(f.filenameuc)
             except:
                 raise UnicodeError(f'"{name}": "{f.filenameuc}" contains a invalid file name.') from None
             
@@ -969,4 +1019,27 @@ class mrs:
         f = self.__files[index]
         return mrs_file(name=f.filenameuc, crc32=f.dh.crc32, size=f.dh.uncompressed_size, compressed_size=f.dh.compressed_size, ftime=f.dh.filetime.mktimedos(), lhextra=f.lh.extra, dhextra=f.dh.extra, dhcomment=f.dh.comment)
 
-    # TODO: set_file
+    def set_file(self, index: int, file: mrs_file):
+        if not isinstance(index, int):
+            raise TypeError('index MUST be an unsigned integer.')
+        
+        if not isinstance(file, mrs_file):
+            raise TypeError('file MUST be a mrs_file object.')
+        
+        if index >= self.__hdr.dir_count:
+            raise IndexError(f'Out of bound index, there\'s no file at index {index}.')
+        
+        # name
+        self.__files[index].filenameuc = file.name
+        (self.__files[index].dh.filename, self.__files[index].filenameenc) = _enc_str(file.name)
+        self.__files[index].lh.filename = self.__files[index].dh.filename
+        # ftime
+        tim = _dostime()
+        tim.dostime(file.ftime)
+        self.__files[index].dh.filetime = tim
+        # lhextra
+        self.__files[index].lh.extra = file.lh_extra
+        # dhextra
+        self.__files[index].dh.extra = file.dh_extra
+        # dhcomment
+        self.__files[index].dh.comment = file.dh_comment
