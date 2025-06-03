@@ -10,6 +10,7 @@ import os
 from os import path
 import re
 import struct
+import sys
 import tempfile
 import time
 import zlib
@@ -157,7 +158,7 @@ class _mrs_hdr:
     __fmt = "<IHHHHIIH"
 
     def __init__(self):
-        self.signature       = 0
+        self.signature       = self.MAGIC2
         self.disk_num        = 0
         self.disk_start      = 0
         self.dir_count       = 0
@@ -207,9 +208,17 @@ class _mrs_hdr:
           self.dir_size,
           self.dir_offset,
           self.comment_length ) = struct.unpack_from(self.__fmt, b)
-
-    def write(self, f):
-        pass
+    
+    def write(self) -> bytearray:
+        b = struct.pack( self.__fmt, self.signature,
+                                     self.disk_num,
+                                     self.disk_start,
+                                     self.dir_count,
+                                     self.total_dir_count,
+                                     self.dir_size,
+                                     self.dir_offset,
+                                     self.comment_length )
+        return bytearray(b)
 
 ######## _mrs_local_hdr ########################################
 class _mrs_local_hdr:
@@ -279,6 +288,20 @@ class _mrs_local_hdr:
 
         self.filetime.time.set_time(_ftime)
         self.filetime.date.set_date(_fdate)
+    
+    def write(self) -> bytearray:
+        b = struct.pack( self.__fmt, self.signature,
+                                     self.version,
+                                     self.flags,
+                                     self.compression,
+                                     self.filetime.time.value,
+                                     self.filetime.date.value,
+                                     self.crc32,
+                                     self.compressed_size,
+                                     self.uncompressed_size,
+                                     self.filename_length,
+                                     self.extra_length )
+        return bytearray(b)
 
 ######## _mrs_central_dir_hdr ##################################
 class _mrs_central_dir_hdr:
@@ -357,6 +380,26 @@ class _mrs_central_dir_hdr:
         if self.comment_length:
             self.comment = b[offset:(offset + self.comment_length)]
     
+    def write(self) -> bytearray:
+        b = struct.pack(self.__fmt, self.signature,
+                                    self.version_made,
+                                    self.version_needed,
+                                    self.flags,
+                                    self.compression,
+                                    self.filetime.time.value,
+                                    self.filetime.date.value,
+                                    self.crc32,
+                                    self.compressed_size,
+                                    self.uncompressed_size,
+                                    self.filename_length,
+                                    self.extra_length,
+                                    self.comment_length,
+                                    self.disk_start,
+                                    self.int_attr,
+                                    self.ext_attr,
+                                    self.offset)
+        return bytearray(b)
+    
     def dump(self):
         print('_mrs_central_dir_hdr dump (%u):' % self.size)
         print('  signature         %08x' % self.signature)
@@ -414,6 +457,18 @@ class mrs_file:
         self.__dhextra         = dhextra
         self.__dhcomment       = dhcomment
     
+    def __str__(self):
+        if self.__name:
+            return self.__name
+        else:
+            pass
+    
+    def __repr__(self):
+        if self.__name:
+            return self.__name
+        else:
+            pass
+    
     @property
     def index(self):
         return self.__index
@@ -430,7 +485,7 @@ class mrs_file:
             _is_valid_filename(v)
         except:
             raise UnicodeError(f'v contains an invalid file name: "{v}".') from None
-        self.__name = v
+        self.__name = v.replace('/', '\\')
     
     @property
     def crc32(self):
@@ -461,17 +516,17 @@ class mrs_file:
     @lh_extra.setter
     def lh_extra(self, v: bytearray|bytes|str|None):
         if isinstance(v, bytearray):
-            print('<bytearray>')
+            # print('<bytearray>')
             self.__lhextra = bytes(v)
         elif isinstance(v, bytes):
-            print('<bytes>')
+            # print('<bytes>')
             self.__lhextra = bytes(v)
         elif isinstance(v, str):
-            print('<str>')
+            # print('<str>')
             self.__lhextra = v.encode('utf-8', 'ignore')
         elif v == None:
             self.__lhextra = None
-            print('<none>')
+            # print('<none>')
         else:
             raise TypeError('lh_extra MUST be a bytearray, bytes, str or None')
     
@@ -482,17 +537,17 @@ class mrs_file:
     @dh_extra.setter
     def dh_extra(self, v: bytearray|bytes|str|None):
         if isinstance(v, bytearray):
-            print('<bytearray>')
+            # print('<bytearray>')
             self.__dhextra = bytes(v)
         elif isinstance(v, bytes):
-            print('<bytes>')
+            # print('<bytes>')
             self.__dhextra = bytes(v)
         elif isinstance(v, str):
-            print('<str>')
+            # print('<str>')
             self.__dhextra = v.encode('utf-8', 'ignore')
         elif v == None:
             self.__dhextra = None
-            print('<none>')
+            # print('<none>')
         else:
             raise TypeError('dh_extra MUST be a bytearray, bytes, str or None')
     
@@ -503,17 +558,17 @@ class mrs_file:
     @dh_comment.setter
     def dh_comment(self, v: bytearray|bytes|str|None):
         if isinstance(v, bytearray):
-            print('<bytearray>')
+            # print('<bytearray>')
             self.__dhcomment = bytes(v)
         elif isinstance(v, bytes):
-            print('<bytes>')
+            # print('<bytes>')
             self.__dhcomment = bytes(v)
         elif isinstance(v, str):
-            print('<str>')
+            # print('<str>')
             self.__dhcomment = v.encode('utf-8', 'ignore')
         elif v == None:
             self.__dhcomment = None
-            print('<none>')
+            # print('<none>')
         else:
             raise TypeError('dh_comment MUST be a bytearray, bytes, str or None')
 
@@ -531,11 +586,51 @@ class mrs_encryption:
     BUFFER          = 8
     ALL             = HEADERS | BUFFER
 
-    def __init__(self):
-        self.base_hdr        = None
-        self.local_hdr       = None
-        self.central_dir_hdr = None
-        self.buffer          = None
+    def __init__(self, *, base_hdr=None, local_hdr=None, central_dir_hdr=None, buffer=None):
+        self.base_hdr        = base_hdr
+        self.local_hdr       = local_hdr
+        self.central_dir_hdr = central_dir_hdr
+        self.buffer          = buffer
+    
+    @property
+    def base_hdr(self):
+        return self.__base_hdr
+    
+    @base_hdr.setter
+    def base_hdr(self, v):
+        if v != None and not callable(v):
+            raise TypeError("base_hdr MUST be a function.")
+        self.__base_hdr = v
+    
+    @property
+    def local_hdr(self):
+        return self.__local_hdr
+    
+    @local_hdr.setter
+    def local_hdr(self, v):
+        if v != None and not callable(v):
+            raise TypeError("local_hdr MUST be a function.")
+        self.__local_hdr = v
+    
+    @property
+    def central_dir_hdr(self):
+        return self.__central_dir_hdr
+
+    @central_dir_hdr.setter
+    def central_dir_hdr(self, v):
+        if v != None and not callable(v):
+            raise TypeError("central_dir_hdr MUST be a function.")
+        self.__central_dir_hdr = v
+    
+    @property
+    def buffer(self):
+        return self.__buffer
+
+    @buffer.setter
+    def buffer(self, v):
+        if v != None and not callable(v):
+            raise TypeError("buffer MUST be a function.")
+        self.__buffer = v
 
 ######## mrs ###################################################
 class mrs:
@@ -647,11 +742,11 @@ class mrs:
         return None
     
     def add_file(self, name: str, /, final_name: str = None, on_dupe: mrs_dupe_behavior = mrs_dupe_behavior.KEEP_NEW):
-        print('mrs.add_file():')
-        print(f'Adding file "{name}"')
+        # print('mrs.add_file():')
+        # print(f'Adding file "{name}"')
 
         real_name = path.realpath(name)
-        print(f'which real path is "{real_name}"')
+        # print(f'which real path is "{real_name}"')
 
         if not final_name:
             final_name = path.split(real_name)[1]
@@ -692,7 +787,7 @@ class mrs:
         #         except:
         #             raise UnicodeError('Unknown encoding for final_name.')
         
-        print(f'Final name will be "{final_name}"')
+        # print(f'Final name will be "{final_name}"')
 
         if not path.exists(real_name):
             raise FileNotFoundError(f'"{name}" was not found.')
@@ -733,8 +828,10 @@ class mrs:
             f.dh.crc32 = zlib.crc32(buf)
             f.lh.crc32 = f.dh.crc32
             try:
-                cobj = zlib.compressobj(9, 8, -15)
-                cbuf = cobj.compress(buf)
+                # print(buf)
+                cobj = zlib.compressobj(9, zlib.DEFLATED, -15)
+                cobj.compress(buf)
+                cbuf = cobj.flush()
             except:
                 cbuf = buf
                 f.dh.compression = mrs.COMPRESSION_STORE
@@ -746,7 +843,7 @@ class mrs:
         
         f.dh.compressed_size = len(cbuf)
         f.lh.compressed_size = f.dh.compressed_size
-        print('Compressed size: %u' % f.dh.compressed_size)
+        # print('Compressed size: %u' % f.dh.compressed_size)
 
         f.lh.compression = f.dh.compression
 
@@ -755,22 +852,22 @@ class mrs:
 
         f.dh.offset = self.__mem.tell()
         self.__mem.write(cbuf)
-        print('Offset is now: %u' % self.__mem.tell())
+        # print('Offset is now: %u' % self.__mem.tell())
         
-        f.dump()
+        # f.dump()
 
         if on_dupe == mrs_dupe_behavior.KEEP_NEW and dup:
             self.__files[dup[0]] = f
-            self.__files[dup[0]].lh.dump()
+            # self.__files[dup[0]].lh.dump()
         else:
             self.__files.append(f)
             self.__hdr.dir_count += 1
             self.__hdr.total_dir_count = self.__hdr.dir_count
     
     def add_folder(self, name: str, /, base_name: str = None, on_dupe: mrs_dupe_behavior = mrs_dupe_behavior.KEEP_NEW):
-        print(f'Adding folder "{name}"')
+        # print(f'Adding folder "{name}"')
         real_path = path.realpath(name)
-        print(f'Which real path is "{real_path}"')
+        # print(f'Which real path is "{real_path}"')
 
         if not path.exists(real_path):
             raise FileNotFoundError(f'"{name}" was not found.')
@@ -781,9 +878,9 @@ class mrs:
         for i in fl:
             fname = f'{real_path}/{i}'
             ffname = f'{base_name}/{i}' if base_name else i
-            print(fname)
+            # print(fname)
             if path.isdir(fname):
-                print(' <skipping dir>')
+                # print(' <skipping dir>')
                 continue
             self.add_file(fname, final_name=ffname, on_dupe=on_dupe)
     
@@ -897,7 +994,9 @@ class mrs:
                 # print(f.dh.offset)
                 # print(f.dh.compressed_size)
                 fbuf = fp.read(f.dh.compressed_size)
-                # TODO: Decrypt the file buffer if there's a decryption routine for it
+                # NOTE: Does it work?
+                if _decrypt.buffer:
+                    fbuf = _decrypt.buffer(fbuf, f.dh.compressed_size)
                 if f.dh.compression == self.COMPRESSION_DEFLATE:
                     # print('Compression method: DEFLATE')
                     # fbuf = fp.read(f.dh.compressed_size)
@@ -926,6 +1025,7 @@ class mrs:
             offset_next = (f.dh.size + f.dh.filename_length + f.dh.extra_length + f.dh.comment_length)
 
             # Update file name
+            f.filenameuc = f.filenameuc.replace('/', '\\')
             f.dh.filename = f.filenameuc.encode(f.filenameenc)
             f.dh.filename_length = len(f.dh.filename)
             f.lh.filename = f.dh.filename
@@ -967,43 +1067,43 @@ class mrs:
     
     def set_decryption(self, *, base_hdr=NotAssigned, local_hdr=NotAssigned, central_dir_hdr=NotAssigned, buffer=NotAssigned):
         if base_hdr != NotAssigned:
-            if not callable(base_hdr):
+            if base_hdr != None and not callable(base_hdr):
                 raise TypeError('"base_hdr" MUST be a function.')
             self.__decrypt.base_hdr = base_hdr
         
         if local_hdr != NotAssigned:
-            if not callable(local_hdr):
+            if local_hdr != None and not callable(local_hdr):
                 raise TypeError('"local_hdr" MUST be a function.')
             self.__decrypt.local_hdr = local_hdr
         
         if central_dir_hdr != NotAssigned:
-            if not callable(central_dir_hdr):
+            if central_dir_hdr != None and not callable(central_dir_hdr):
                 raise TypeError('"central_dir_hdr" MUST be a function.')
             self.__decrypt.central_dir_hdr = central_dir_hdr
         
         if buffer != NotAssigned:
-            if not callable(buffer):
+            if buffer != None and not callable(buffer):
                 raise TypeError('"buffer" MUST be a function.')
             self.__decrypt.buffer = buffer
     
     def set_encryption(self, *, base_hdr=NotAssigned, local_hdr=NotAssigned, central_dir_hdr=NotAssigned, buffer=NotAssigned):
         if base_hdr != NotAssigned:
-            if not callable(base_hdr):
+            if base_hdr != None and not callable(base_hdr):
                 raise TypeError('"base_hdr" MUST be a function.')
             self.__encrypt.base_hdr = base_hdr
         
         if local_hdr != NotAssigned:
-            if not callable(local_hdr):
+            if local_hdr != None and not callable(local_hdr):
                 raise TypeError('"local_hdr" MUST be a function.')
             self.__encrypt.local_hdr = local_hdr
         
         if central_dir_hdr != NotAssigned:
-            if not callable(central_dir_hdr):
+            if central_dir_hdr != None and  not callable(central_dir_hdr):
                 raise TypeError('"central_dir_hdr" MUST be a function.')
             self.__encrypt.central_dir_hdr = central_dir_hdr
         
         if buffer != NotAssigned:
-            if not callable(buffer):
+            if buffer != None and not callable(buffer):
                 raise TypeError('"buffer" MUST be a function.')
             self.__encrypt.buffer = buffer
     
@@ -1038,17 +1138,170 @@ class mrs:
         self.__files[index].filenameuc = file.name
         (self.__files[index].dh.filename, self.__files[index].filenameenc) = _enc_str(file.name)
         self.__files[index].lh.filename = self.__files[index].dh.filename
+        self.__files[index].dh.filename_length = len(self.__files[index].dh.filename)
+        self.__files[index].lh.filename_length = self.__files[index].dh.filename_length
         # ftime
         tim = _dostime()
         tim.dostime(file.ftime)
         self.__files[index].dh.filetime = tim
         # lhextra
         self.__files[index].lh.extra = file.lh_extra
+        self.__files[index].lh.extra_length = len(file.lh_extra) if file.lh_extra else 0
         # dhextra
         self.__files[index].dh.extra = file.dh_extra
+        self.__files[index].dh.extra_length = len(file.dh_extra) if file.dh_extra else 0
         # dhcomment
         self.__files[index].dh.comment = file.dh_comment
+        self.__files[index].dh.comment_length = len(file.dh_comment) if file.dh_comment else 0
     
     def get_files(self):
         for i in self.__files:
             yield mrs_file(index=self.__files.index(i), name=i.filenameuc, crc32=i.dh.crc32, compressed_size=i.dh.compressed_size, size=i.dh.uncompressed_size, ftime=i.dh.filetime.mktimedos(), lhextra=i.lh.extra, dhextra=i.dh.extra, dhcomment=i.dh.comment)
+    
+    def save_mrs(self, filename: str):
+        # print(f'Saving mrs file: {filename}')
+        rfilename = path.realpath(filename)
+        # print(f'Which real path is {rfilename}')
+        if path.exists(rfilename) and not path.isfile(rfilename):
+            raise IsADirectoryError(f'"{rfilename}" already exists, and it is a folder.')
+        
+        # print(f'We have {self.get_file_count()} file(s)')
+        hdr = self.__hdr
+
+        _encrypt = mrs_encryption()
+        _encrypt.base_hdr        = self.__encrypt.base_hdr if self.__encrypt.base_hdr else self.__mrs_default_encrypt
+        _encrypt.local_hdr       = self.__encrypt.local_hdr if self.__encrypt.local_hdr else _encrypt.base_hdr
+        _encrypt.central_dir_hdr = self.__encrypt.central_dir_hdr if self.__encrypt.central_dir_hdr else _encrypt.base_hdr
+        _encrypt.buffer          = self.__encrypt.buffer
+
+        f = None
+        try:
+            f = open(filename, 'wb')
+        except:
+            raise IOError(f'Cannot save to "{filename}".')
+        
+        offsets = []
+        offset = 0
+        for i in self.__files:
+            offsets.append(offset)
+            blh = i.lh.write()
+            blh = _encrypt.local_hdr(blh, _mrs_local_hdr.size)
+            f.write(blh)
+            # print(blh.hex())
+            if i.lh.filename_length != 0:
+                bfilename = i.lh.filename
+                bfilename = _encrypt.local_hdr(bfilename, i.lh.filename_length)
+                f.write(bfilename)
+            if i.lh.extra_length != 0:
+                bextra = i.lh.extra
+                bextra = _encrypt.local_hdr(bextra, i.lh.extra_length)
+                f.write(bextra)
+            bf = self.__mem_read(i.dh.offset, i.dh.compressed_size)
+            if _encrypt.buffer:
+                bf = _encrypt.buffer(bf, i.dh.compressed_size)
+            f.write(bf)
+            offset += _mrs_local_hdr.size + i.lh.filename_length + i.lh.extra_length + i.lh.compressed_size
+        
+        # print('Offset is now %08x' % offset)
+        hdr.dir_offset = offset
+        dhbuf = bytearray()
+        for i in self.__files:
+            dh = i.dh
+            dh.offset = offsets[self.__files.index(i)]
+            dhbuf += dh.write()
+            dhbuf += dh.filename
+            if dh.extra:
+                dhbuf += dh.extra
+            if dh.comment:
+                dhbuf += dh.comment
+        
+        hdr.dir_size = len(dhbuf)
+        dhbuf = _encrypt.central_dir_hdr(dhbuf, len(dhbuf))
+        f.write(dhbuf)
+
+        bhdr = hdr.write()
+        bhdr = _encrypt.base_hdr(bhdr, _mrs_hdr.size)
+        f.write(bhdr)
+        
+        f.close()
+    
+    def save_folder(self, filename: str):
+        # print(f'Let\'s extract files to "{filename}"')
+        rfilename = path.realpath(filename)
+        # print(f'Which real path is "{rfilename}"')
+        if path.exists(rfilename) and not path.isdir(rfilename):
+            raise NotADirectoryError(f'Cannot save to "{filename}", "{filename}" exists and is not a directory.')
+        
+        for i in self.__files:
+            outname = f'{filename}/{i.filenameuc}'
+            os.makedirs(path.split(outname)[0], exist_ok=True)
+            b = self.read(self.__files.index(i))
+            f = None
+            try:
+                f = open(outname, 'wb')
+            except:
+                print(f'Warning: Cannot save "{outname}".', file=sys.stderr)
+                continue
+            f.write(b)
+            f.close()
+
+# TODO: Custom signatures
+def compile(name, *, output=None, encryption: mrs_encryption=None):
+    f = mrs()
+
+    if encryption and not isinstance(encryption, mrs_encryption):
+        raise TypeError('encryption MUST be a mrs_encryption object.')
+    
+    if encryption:
+        f.set_encryption(base_hdr=encryption.base_hdr, local_hdr=encryption.local_hdr, central_dir_hdr=encryption.central_dir_hdr, buffer=encryption.buffer)
+    
+    try:
+        f.add_folder(name)
+    except FileNotFoundError:
+        pass
+    except:
+        raise
+
+    if not output:
+        output = f'{name}.mrs'
+
+    f.save_mrs(output)
+
+def decompile(name, *, output=None, encryption: mrs_encryption = None, sig_check = None):
+    f = mrs()
+
+    if encryption and not isinstance(encryption, mrs_encryption):
+        raise TypeError('encryption MUST be a mrs_encryption object.')
+
+    if encryption:
+        f.set_decryption(base_hdr=encryption.base_hdr, local_hdr=encryption.local_hdr, central_dir_hdr=encryption.central_dir_hdr, buffer=encryption.buffer)
+    
+    if sig_check:
+        f.set_signature_check(sig_check)
+    
+    f.add_mrs(name)
+
+    if not output:
+        output = path.splitext(name)[0]
+
+    f.save_folder(output)
+
+def list_files(name, *, encryption: mrs_encryption = None, sig_check = None) -> list[mrs_file]:
+    f = mrs()
+
+    if encryption and not isinstance(encryption, mrs_encryption):
+        raise TypeError('encryption MUST be a mrs_encryption object.')
+
+    if encryption:
+        f.set_decryption(base_hdr=encryption.base_hdr, local_hdr=encryption.local_hdr, central_dir_hdr=encryption.central_dir_hdr, buffer=encryption.buffer)
+    
+    if sig_check:
+        f.set_signature_check(sig_check)
+    
+    f.add_mrs(name)
+
+    fil = []
+    for i in f.get_files():
+        fil.append(i)
+    
+    return fil
